@@ -8,6 +8,7 @@ import Prelude
 import Data.Foldable (traverse_)
 import Data.Maybe (Maybe(..))
 import Data.Newtype (unwrap)
+import Debug.Trace (traceM)
 import Effect (Effect)
 import Effect.Aff (Aff)
 import Effect.Class (liftEffect)
@@ -76,21 +77,27 @@ mkSpec handler renderChildRef document =
   buildWidget spec = render
     where
     render :: V.Machine (ComponentSlot slots Aff action) DOM.Node
-    render = EFn.mkEffectFn1 \slot ->
+    render = EFn.mkEffectFn1 \slot -> do
+      traceM { render: slot }
       case slot of
         ComponentSlot cs ->
           EFn.runEffectFn1 renderComponentSlot cs
         ThunkSlot t -> do
           step <- EFn.runEffectFn1 buildThunk t
           pure $ V.mkStep $ V.Step (V.extract step) (Just step) patch done
-        PortalSlot elem inner ->
-          EFn.runEffectFn2 renderPortalSlot elem inner
+        PortalSlot elem inner -> do
+          step <- EFn.runEffectFn1 buildPortalThunk (Thunk.thunked (\_ _ → false) (const inner) unit)
+          void $ DOM.appendChild (V.extract step) (HTMLElement.toNode elem)
+          traceM { node: V.extract step, elem }
+          pure $ V.mkStep $ V.Step (V.extract step) (Just step) patch done
 
     patch
-      :: EFn.EffectFn2 (WidgetState slots action)
+      :: EFn.EffectFn2
+            (WidgetState slots action)
             (ComponentSlot slots Aff action)
             (V.Step (ComponentSlot slots Aff action) DOM.Node)
-    patch = EFn.mkEffectFn2 \st slot ->
+    patch = EFn.mkEffectFn2 \st slot -> do
+      traceM { patch: slot, st }
       case st of
         Just step -> case slot of
           ComponentSlot cs -> do
@@ -100,12 +107,19 @@ mkSpec handler renderChildRef document =
             step' <- EFn.runEffectFn2 V.step step t
             pure $ V.mkStep $ V.Step (V.extract step') (Just step') patch done
           PortalSlot elem inner -> do
-            EFn.runEffectFn1 V.halt step
-            EFn.runEffectFn2 renderPortalSlot elem inner
-        _ -> EFn.runEffectFn1 render slot
+            step' <- EFn.runEffectFn2 V.step step (Thunk.thunked (\_ _ → false) (const inner) unit)
+            traceM { "node'": V.extract step', elem }
+            void $ DOM.appendChild (V.extract step') (HTMLElement.toNode elem)
+            traceM =<< DOM.parentNode (V.extract step')
+            pure $ V.mkStep $ V.Step (V.extract step') (Just step') patch done
+        _ ->
+          EFn.runEffectFn1 render slot
 
     buildThunk :: V.Machine (HTMLThunk slots action) DOM.Node
     buildThunk = Thunk.buildThunk unwrap spec
+
+    buildPortalThunk :: V.Machine (HTMLThunk slots action) DOM.Node
+    buildPortalThunk = Thunk.buildPortalThunk unwrap spec
 
     renderComponentSlot
       :: EFn.EffectFn1
@@ -117,22 +131,12 @@ mkSpec handler renderChildRef document =
       let node = getNode rsx
       pure $ V.mkStep $ V.Step node Nothing patch done
 
-    renderPortalSlot
-      :: EFn.EffectFn2
-            DOM.HTMLElement
-            (HTML (ComponentSlot slots Aff action) action)
-            (V.Step (ComponentSlot slots Aff action) DOM.Node)
-    renderPortalSlot = EFn.mkEffectFn2 \elem (HTML vdom) -> do
-      machine <- EFn.runEffectFn1 (V.buildVDom spec) vdom
-      let node = V.extract machine
-      void $ DOM.appendChild node (HTMLElement.toNode elem)
-      emptyNode <- EFn.runEffectFn2 Util.createTextNode "" document
-      pure $ V.mkStep $ V.Step emptyNode Nothing patch done
-
   done :: EFn.EffectFn1 (WidgetState slots action) Unit
   done = EFn.mkEffectFn1 \st ->
     case st of
-      Just step -> EFn.runEffectFn1 V.halt step
+      Just step -> do
+        traceM "done"
+        EFn.runEffectFn1 V.halt step
       _ -> pure unit
 
   getNode :: RenderStateX RenderState -> DOM.Node
@@ -174,6 +178,7 @@ renderSpec document container =
         let spec = mkSpec handler renderChildRef document
         machine <- EFn.runEffectFn1 (V.buildVDom spec) vdom
         let node = V.extract machine
+        traceM "Append"
         void $ DOM.appendChild node (HTMLElement.toNode container)
         pure $ RenderState { machine, node, renderChildRef }
       Just (RenderState { machine, node, renderChildRef }) -> do
@@ -183,6 +188,7 @@ renderSpec document container =
         machine' <- EFn.runEffectFn2 V.step machine vdom
         let newNode = V.extract machine'
         when (not unsafeRefEq node newNode) do
+          traceM "Subst"
           substInParent newNode nextSib parent
         pure $ RenderState { machine: machine', node: newNode, renderChildRef }
 
